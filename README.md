@@ -46,7 +46,7 @@ const char* WIFI_PASS = "thisisacamwifi";
 At this point, we have programmed our ESP32 cameras. We assume that you have installed the standard L4T operating system specific to your Jetson board, and it is ready to install some packages (as root).
 
 ```
-apt install -y curl jq runc iptables conntrack nvidia-container-runtime nvidia-container-toolkit
+apt install -y curl jq runc iptables conntrack nvidia-container-runtime nvidia-container-toolkit containernetworking-plugins
 ```
 
 Disable firewalld:
@@ -58,12 +58,20 @@ systemctl disable --now firewalld
 Install CRI-O as our container runtime:
 
 ```
-curl https://raw.githubusercontent.com/cri-o/cri-o/main/scripts/get | bash 
+export OS=xUbuntu_20.04
+export VERSION=1.22
+echo "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/ /" > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
+echo "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$VERSION/$OS/ /" > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:$VERSION.list
+
+curl -L https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:$VERSION/$OS/Release.key | apt-key add -
+curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/Release.key | apt-key add -
+
+apt-get update
+apt-get install cri-o cri-o-runc
 
 ```
 
 Configure CRI-O in order to use the NVIDIA Container Runtime
-
 
 ```
 rm /etc/crio/crio.conf.d/*
@@ -83,17 +91,16 @@ runtime_type = "oci"
 runtime_root = "/run/runc"
 EOF
 
-rm -rf /etc/cni/net.d/10-crio-bridge.conf
+rm -rf /etc/cni/net.d/100-crio-bridge.conf
 ```
 
 Download MicroShift binary:
 
 ```
-export ARCH=arm64
-export VERSION=$(curl -s https://api.github.com/repos/redhat-et/microshift/releases | grep tag_name | head -n 1 | cut -d '"' -f 4)
-curl -LO https://github.com/redhat-et/microshift/releases/download/$VERSION/microshift-linux-${ARCH}
-mv microshift-linux-${ARCH} /usr/bin/microshift; chmod 755 /usr/bin/microshift
+curl -LO https://github.com/openshift/microshift/releases/download/4.8.0-0.microshift-2022-04-20-182108/microshift-linux-arm64
+mv microshift-linux-arm64 /usr/bin/microshift; chmod 755 /usr/bin/microshift
 ```
+
 Create the MicroShift's systemd service:
 
 ```
@@ -113,11 +120,33 @@ WantedBy=multi-user.target
 EOF
 ```
 
+Create the Microshift crio configuration :
+```
+cat << EOF > /etc/crio/crio.conf.d/microshift.conf
+[crio.runtime]
+selinux = true
+conmon = ""
+conmon_cgroup = "pod"
+cgroup_manager = "systemd"
+[crio.network]
+# cbr0 is the name configured by flannel in /etc/cni/net.d/ config file
+# by declaring this crio will wait until that network is configured.
+cni_default_network = "cbr0"
+# rhel8 crio is configured to only look at /usr/libexec/cni, we override that here
+plugin_dirs = [
+        "/usr/libexec/cni",
+        "/opt/cni/bin"
+]
+EOF
+```
+
 Enable and run CRI-O and MicroShift services:
+
 ```
 systemctl enable crio --now
 systemctl enable microshift.service --now
 ```
+
 Download and install the oc client:
 
 ```
